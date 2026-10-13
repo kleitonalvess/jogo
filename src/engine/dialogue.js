@@ -500,9 +500,11 @@ export function dossier(state, r) {
   const k = state.player.known[r.id] || { met: null, about: 0, mood: null, facts: [] };
   const plan = planFor(state, r, state.time.minute);
   const relations = [];
+  // r.kin[id] diz o que o outro é para r; o registro descreve o que r é para o outro.
+  const inverse = { spouse: 'spouse', parent: 'child', child: 'parent', sibling: 'sibling', aunt: 'niece', niece: 'aunt' };
   for (const [id, kind] of Object.entries(r.kin)) {
     const o = residentById(state, Number(id));
-    if (o) relations.push(`${kinLabel(kind, o)} de ${fullName(o)}${o.alive ? '' : ' (†)'}`.replace(/^./, (c) => c.toUpperCase()));
+    if (o) relations.push(`${kinLabel(inverse[kind], r)} de ${fullName(o)}${o.alive ? '' : ' (†)'}`.replace(/^./, (c) => c.toUpperCase()));
   }
   const friends = Object.entries(r.bonds)
     .filter(([id, v]) => v >= 40 && !r.kin[id])
