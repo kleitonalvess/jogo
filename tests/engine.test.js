@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  assignJob,
   assignWorker,
   build,
   canBuild,
@@ -10,63 +11,74 @@ import {
   currentEvent,
   demolish,
   deserialize,
+  discoverFragment,
   endCycle,
   idleWorkers,
   launchExpedition,
   moduleAt,
-  removePeople,
   resolveEvent,
   serialize,
   setMaintenance,
   toggleDecree,
+  workersOf,
 } from '../src/engine/game.js';
-import { EXPEDITIONS, FRAGMENTS_TO_WIN, MODULES, START } from '../src/engine/data.js';
+import { EXPEDITIONS, FRAGMENTS, FRAGMENTS_TO_WIN, MODULES } from '../src/engine/data.js';
+import { canWork, living, residentByKey } from '../src/engine/people/population.js';
 
-function freshGame() {
-  const state = createGame(42);
+function freshGame(seed = 42) {
+  const state = createGame(seed);
   state.eventQueue = [];
   return state;
 }
 
-// Avança ciclos ignorando eventos aleatórios (sempre escolhe a primeira opção).
-function advance(state, cycles) {
-  for (let i = 0; i < cycles; i++) {
-    while (currentEvent(state)) resolveEvent(state, currentEvent(state).id === 'fragment' ? 1 : 0);
+// Avança dias resolvendo eventos com a primeira opção possível.
+function advance(state, days) {
+  for (let i = 0; i < days; i++) {
+    while (currentEvent(state)) {
+      const r = resolveEvent(state, currentEvent(state).id === 'fragment' ? 1 : 0);
+      if (!r.ok) state.eventQueue.shift();
+    }
     if (state.status !== 'playing') return;
     const result = endCycle(state);
     assert.ok(result.ok, result.error);
   }
 }
 
-test('a colônia começa com a população e a disposição definidas', () => {
+test('a colônia começa com 34 moradores nomeados e as vagas ocupadas', () => {
   const state = freshGame();
-  assert.equal(state.population, START.population);
-  assert.equal(state.modules.length, 6);
+  assert.equal(state.residents.length, 34);
+  assert.equal(state.modules.length, 12);
   assert.equal(moduleAt(state, 0, 0).type, 'core');
-  const assigned = state.modules.reduce((s, m) => s + m.workers, 0) + state.maintenance;
-  assert.equal(idleWorkers(state), START.population - assigned);
+  const names = new Set(state.residents.map((r) => `${r.first} ${r.last}`));
+  assert.equal(names.size, 34, 'nomes únicos');
+  assert.ok(residentByKey(state, 'irene'));
+  assert.equal(idleWorkers(state), 0);
+  assert.equal(state.maintenance, 2);
+  for (const m of state.modules) {
+    assert.ok(m.workers <= (MODULES[m.type].slots || 0), `${m.type} dentro do limite de vagas`);
+  }
+  // Toda pessoa tem um leito.
+  for (const r of state.residents) assert.ok(state.modules.some((m) => m.id === r.home));
 });
 
 test('a mesma semente e as mesmas ações produzem a mesma partida', () => {
   const run = () => {
     const state = createGame(7);
-    for (let i = 0; i < 30 && state.status === 'playing'; i++) {
-      while (currentEvent(state)) resolveEvent(state, 0);
-      endCycle(state);
-    }
+    advance(state, 25);
     return serialize(state);
   };
   assert.equal(run(), run());
 });
 
-test('construir consome materiais e leva ciclos para concluir', () => {
+test('construir consome materiais e leva dias para concluir', () => {
   const state = freshGame();
   const before = state.resources.materials;
-  const result = build(state, 'workshop', 2, 0);
+  const result = build(state, 'geothermal', 3, 0);
   assert.ok(result.ok, result.error);
-  assert.equal(state.resources.materials, before - MODULES.workshop.cost);
+  assert.equal(state.resources.materials, before - MODULES.geothermal.cost);
+  setMaintenance(state, -1);
   assert.equal(assignWorker(state, result.module.id, 1).ok, false, 'não aceita gente em obra');
-  advance(state, MODULES.workshop.buildCycles);
+  advance(state, MODULES.geothermal.buildCycles);
   assert.equal(result.module.buildLeft, 0);
   assert.ok(assignWorker(state, result.module.id, 1).ok);
 });
@@ -74,43 +86,45 @@ test('construir consome materiais e leva ciclos para concluir', () => {
 test('regras de posicionamento: conexão vertical e faixas de profundidade', () => {
   const state = freshGame();
   state.resources.materials = 1000;
-  assert.equal(canBuild(state, 'habitat', 3, 0).ok, false, 'nível 4 sem nível 3');
-  assert.equal(canBuild(state, 'geothermal', 2, 0).ok, false, 'geotérmico só a partir do nível 4');
-  assert.ok(build(state, 'habitat', 2, 0).ok);
-  assert.ok(canBuild(state, 'geothermal', 3, 0).ok);
+  assert.equal(canBuild(state, 'habitat', 4, 0).ok, false, 'nível 5 sem nível 4');
+  assert.equal(canBuild(state, 'geothermal', 2, 0).ok, false, 'nível 3 ocupado');
+  assert.ok(build(state, 'habitat', 3, 0).ok);
+  assert.ok(canBuild(state, 'geothermal', 4, 0).ok);
   assert.equal(canBuild(state, 'tidal', 3, 1).ok, false, 'turbina só até o nível 3');
-  assert.ok(build(state, 'dock', 2, 1).ok);
-  assert.equal(canBuild(state, 'dock', 2, 2).ok, false, 'apenas uma eclusa');
+  assert.equal(canBuild(state, 'dock', 3, 2).ok, false, 'apenas uma eclusa');
 });
 
 test('não é possível desmontar o único módulo que sustenta um nível inferior', () => {
   const state = freshGame();
   state.resources.materials = 1000;
-  const upper = build(state, 'habitat', 2, 0).module;
-  build(state, 'habitat', 3, 0);
+  const upper = build(state, 'habitat', 3, 0).module;
+  build(state, 'habitat', 4, 0);
   assert.equal(demolish(state, upper.id).ok, false);
   assert.equal(demolish(state, moduleAt(state, 0, 0).id).ok, false, 'núcleo é fixo');
 });
 
-test('atribuição respeita pessoas ociosas e vagas', () => {
+test('cada vaga é uma pessoa: atribuir escolhe alguém ocioso e com aptidão', () => {
   const state = freshGame();
-  const oxygen = moduleAt(state, 1, 0);
-  const slots = MODULES.oxygen.slots;
-  while (oxygen.workers < slots) assert.ok(assignWorker(state, oxygen.id, 1).ok);
-  assert.equal(assignWorker(state, oxygen.id, 1).ok, false);
-  while (idleWorkers(state) > 0) setMaintenance(state, 1);
-  assert.equal(setMaintenance(state, 1).ok, false);
-  assert.equal(assignWorker(state, moduleAt(state, 1, 1).id, 1).ok, false);
+  const workshop = state.modules.find((m) => m.type === 'workshop');
+  assert.equal(assignWorker(state, workshop.id, 1).ok, false, 'ninguém ocioso no começo');
+  setMaintenance(state, -1);
+  assert.equal(idleWorkers(state), 1);
+  assert.ok(assignWorker(state, workshop.id, 1).ok);
+  assert.equal(workersOf(state, workshop.id).length, 4);
+  const irene = residentByKey(state, 'irene');
+  assert.ok(assignJob(state, irene.id, null).ok);
+  assert.equal(irene.job, null);
+  const marta = residentByKey(state, 'marta');
+  assert.equal(assignJob(state, marta.id, workshop.id).ok, false, 'a chefe da guarda tem outra função');
 });
 
 test('déficit de energia sem bateria reduz a eficiência dos módulos', () => {
   const state = freshGame();
   state.resources.energy = 0;
-  moduleAt(state, 0, 2).workers = 0; // desliga a turbina
   const eco = computeEconomy(state);
+  assert.ok(eco.energy.net < 0, 'a colônia começa com déficit de energia');
   assert.ok(eco.energy.blackout);
   assert.ok(eco.energy.efficiency < 1);
-  assert.ok(eco.production.oxygen < moduleAt(state, 1, 0).workers * MODULES.oxygen.rate);
 });
 
 test('racionamento corta o consumo de água e comida', () => {
@@ -123,7 +137,7 @@ test('racionamento corta o consumo de água e comida', () => {
   assert.equal(rationed.oxygen, normal.oxygen);
 });
 
-test('mudar o Estatuto custa confiança, mas desfazer no mesmo ciclo é grátis', () => {
+test('mudar o Estatuto custa confiança, mas desfazer no mesmo dia é grátis', () => {
   const state = freshGame();
   const base = computeEconomy(state).trustDelta;
   toggleDecree(state, 'patrols');
@@ -132,68 +146,61 @@ test('mudar o Estatuto custa confiança, mas desfazer no mesmo ciclo é grátis'
   assert.equal(computeEconomy(state).trustDelta, base);
 });
 
-test('falta de oxigênio mata pessoas no fim do ciclo', () => {
+test('falta de oxigênio mata moradores com nome e deixa luto na família', () => {
   const state = freshGame();
   state.resources.oxygen = 0;
-  moduleAt(state, 1, 0).workers = 0;
+  for (const r of state.residents) if (r.job === state.modules.find((m) => m.type === 'oxygen').id) r.job = null;
   const eco = computeEconomy(state);
   assert.ok(eco.shortages.oxygen);
-  const before = state.population;
+  const before = living(state).length;
   endCycle(state);
-  assert.equal(state.population, before - eco.deaths.oxygen);
-  assert.ok(state.stats.deaths >= eco.deaths.oxygen);
+  const dead = state.residents.filter((r) => !r.alive);
+  assert.equal(living(state).length, before - eco.deaths.oxygen);
+  assert.ok(dead.every((r) => r.deathCause === 'oxygen'));
+  assert.ok(state.log.some((l) => l.text.includes('morreu')));
+  assert.ok(state.gatherings.some((g) => g.kind === 'funeral'), 'velório marcado');
 });
 
-test('pessoas removidas saem primeiro dos ociosos, depois da manutenção', () => {
+test('expedição leva pessoas com nome e volta depois dos dias previstos', () => {
   const state = freshGame();
-  const idle = idleWorkers(state);
-  removePeople(state, idle + 1);
-  assert.equal(idleWorkers(state), 0);
-  assert.equal(state.maintenance, START.maintenance - 1);
-});
-
-test('expedição leva suprimentos e pessoas e volta depois dos ciclos previstos', () => {
-  const state = freshGame();
-  state.resources.materials = 1000;
   state.resources.oxygen = 500;
   state.resources.food = 500;
-  const dock = build(state, 'dock', 2, 0).module;
-  dock.buildLeft = 0;
-  const pop = state.population;
+  setMaintenance(state, -1);
   assert.ok(launchExpedition(state, 'wreck', 2).ok);
-  assert.equal(state.population, pop - 2);
+  const team = state.residents.filter((r) => r.away);
+  assert.equal(team.length, 2);
+  assert.ok(team.some((r) => r.key === 'icaro'), 'o escafandrista-chefe lidera');
   assert.equal(launchExpedition(state, 'wreck', 1).ok, false, 'uma equipe por vez');
   advance(state, EXPEDITIONS.wreck.cycles);
   assert.equal(state.expedition, null);
-  assert.equal(state.stats.expeditions, 1);
+  assert.ok(state.residents.every((r) => !r.away));
 });
 
-test('fragmentos: revelar aumenta confiança, lacrar acumula segredos', () => {
+test('fragmentos: revelar marca assembleia, lacrar cria um segredo que as testemunhas conhecem', () => {
   const state = freshGame();
-  state.fragments = 1;
-  state.eventQueue.push({ id: 'fragment', data: { index: 0 } });
-  const trust = state.trust;
+  const teodoro = residentByKey(state, 'teodoro');
+  assert.ok(discoverFragment(state, 'founding', [teodoro.id]).ok);
+  assert.equal(currentEvent(state).id, 'fragment');
   resolveEvent(state, 0);
-  assert.equal(state.trust, trust + 6);
-  assert.equal(state.revealed, 1);
+  assert.equal(state.archive[0].status, 'revealed');
+  assert.ok(state.gatherings.some((g) => g.kind === 'assembly'));
 
-  state.fragments = 2;
-  state.eventQueue.push({ id: 'fragment', data: { index: 1 } });
+  discoverFragment(state, 'buoy', [teodoro.id]);
   resolveEvent(state, 1);
   assert.equal(state.secrets, 1);
-  assert.deepEqual(state.archive, [
-    { index: 0, status: 'revealed' },
-    { index: 1, status: 'sealed' },
-  ]);
+  const secret = state.rumors.find((r) => r.kind === 'secret');
+  assert.ok(secret.knownBy.includes(teodoro.id));
+  assert.equal(discoverFragment(state, 'buoy').ok, false, 'não se encontra o mesmo documento duas vezes');
 });
 
 test('o último fragmento abre a decisão final e a escolha encerra a partida', () => {
   const state = freshGame();
-  state.fragments = FRAGMENTS_TO_WIN;
-  state.eventQueue.push({ id: 'fragment', data: { index: FRAGMENTS_TO_WIN - 1 } });
-  resolveEvent(state, 1);
+  for (const f of FRAGMENTS.slice(0, FRAGMENTS_TO_WIN)) {
+    discoverFragment(state, f.id);
+    resolveEvent(state, 0);
+  }
   assert.equal(currentEvent(state).id, 'finalTruth');
-  assert.equal(endCycle(state).ok, false, 'evento pendente bloqueia o ciclo');
+  assert.equal(endCycle(state).ok, false, 'evento pendente bloqueia o dia');
   resolveEvent(state, 0);
   assert.equal(state.status, 'won');
   assert.deepEqual(state.outcome, { kind: 'ending', key: 'truth' });
@@ -202,11 +209,19 @@ test('o último fragmento abre a decisão final e a escolha encerra a partida', 
 test('casco a zero encerra a partida em derrota', () => {
   const state = freshGame();
   state.hull = 0.1;
-  state.maintenance = 0;
+  for (const r of state.residents) if (r.job === 'maintenance') r.job = null;
   endCycle(state);
   assert.equal(state.status, 'lost');
   assert.equal(state.outcome.key, 'hull');
   assert.equal(endCycle(state).ok, false);
+});
+
+test('revolta quando a maioria dos adultos perde a fé no Conselho', () => {
+  const state = freshGame();
+  for (const r of state.residents) r.opinion = 5;
+  endCycle(state);
+  assert.equal(state.status, 'lost');
+  assert.equal(state.outcome.key, 'revolt');
 });
 
 test('salvar e carregar preserva o estado', () => {
@@ -215,4 +230,15 @@ test('salvar e carregar preserva o estado', () => {
   const copy = deserialize(serialize(state));
   assert.deepEqual(copy, state);
   assert.throws(() => deserialize(JSON.stringify({ version: 999 })));
+});
+
+test('quem pode trabalhar exclui crianças, idosos, doentes e quem está fora', () => {
+  const state = freshGame();
+  const nina = residentByKey(state, 'nina');
+  const clara = residentByKey(state, 'clara');
+  assert.equal(canWork(nina), false);
+  assert.equal(canWork(clara), false);
+  const irene = residentByKey(state, 'irene');
+  irene.status = { kind: 'sick', days: 2 };
+  assert.equal(canWork(irene), false);
 });

@@ -1,5 +1,5 @@
 // Simulador de balanceamento: joga partidas automáticas com estratégias
-// simples e resume os resultados. Uso: node scripts/simulate.js [partidas] [ciclos]
+// simples e resume os resultados. Uso: node scripts/simulate.js [partidas] [dias]
 
 import {
   assignWorker,
@@ -17,19 +17,22 @@ import {
   launchExpedition,
   resolveEvent,
   setMaintenance,
+  syncWorkers,
   toggleDecree,
 } from '../src/engine/game.js';
 import { LEVELS, MODULES, SLOTS_PER_LEVEL } from '../src/engine/data.js';
+import { canWork, inBase } from '../src/engine/people/population.js';
 
-const WEIGHTS = { oxygen: 0.3, water: 0.2, food: 0.2, materials: 0.3, energy: 0.05, hull: 1, morale: 0.8, trust: 1.2, secrets: -2, people: -12 };
+const WEIGHTS = { oxygen: 0.3, water: 0.2, food: 0.2, materials: 0.3, energy: 0.05, hull: 1, morale: 0.8, trust: 1.2, secrets: -3, people: -12, speakerOpinion: 0.1, subjectOpinion: 0.1 };
 
 function scoreChoice(state, choice) {
   let score = 0;
   for (const [key, value] of Object.entries(choice.effects)) {
     if (typeof value === 'number' && WEIGHTS[key]) score += value * WEIGHTS[key];
     if (key === 'modifier') score += (value.mult - 1) * value.cycles * 10;
+    if (key === 'secret') score -= 4;
   }
-  if (state.trust < 30 && choice.effects.trust) score += choice.effects.trust * 2;
+  if (state.trust < 35 && choice.effects.trust) score += choice.effects.trust * 2;
   return score;
 }
 
@@ -38,8 +41,11 @@ function resolveEvents(state, chooser) {
   while (currentEvent(state) && state.status === 'playing' && guard++ < 10) {
     const def = eventDef(currentEvent(state));
     const options = def.choices.map((c, i) => ({ c, i })).filter(({ c }) => canAfford(state, c.effects));
-    const picked = chooser(state, options);
-    resolveEvent(state, picked.i);
+    if (options.length === 0) {
+      state.eventQueue.shift();
+      continue;
+    }
+    resolveEvent(state, chooser(state, options).i);
   }
 }
 
@@ -49,13 +55,10 @@ export const strategies = {
     resolveEvents(state, (s, options) => options[0]);
   },
 
-  // Uma estratégia razoável, mas não ótima, para checar se o jogo é vencível.
+  // Uma estratégia razoável, mas não ótima, para checar se o jogo é sustentável.
   steady(state) {
-    resolveEvents(state, (s, options) =>
-      options.reduce((best, o) => (scoreChoice(s, o.c) > scoreChoice(s, best.c) ? o : best)),
-    );
+    resolveEvents(state, (s, options) => options.reduce((best, o) => (scoreChoice(s, o.c) > scoreChoice(s, best.c) ? o : best)));
     if (state.status !== 'playing') return;
-
     planBuilds(state);
     planWorkers(state);
     planDecrees(state);
@@ -88,74 +91,73 @@ function tryBuild(state, type) {
 
 function planBuilds(state) {
   const eco = computeEconomy(state);
-  const pop = state.population + 4;
+  const pop = eco.population + 3;
   const building = state.modules.some((m) => m.buildLeft > 0);
-  if (building && state.resources.materials < 60) return;
+  if (building && state.resources.materials < 70) return;
 
-  if (count(state, 'workshop') === 0) return void tryBuild(state, 'workshop');
-  if (eco.energy.net < 2) {
-    if (tryBuild(state, 'tidal') || tryBuild(state, 'geothermal')) return;
+  const spareGenerator = state.modules.some((m) => (m.type === 'geothermal' || m.type === 'tidal') && (m.buildLeft > 0 || m.workers < MODULES[m.type].slots));
+  if (eco.energy.net < 0 && !spareGenerator) {
+    if (tryBuild(state, 'geothermal') || tryBuild(state, 'tidal')) return;
   }
+  // Cada módulo a mais desgasta o casco: só expande com folga de reparo.
+  if (eco.hull.wear > 6.5) return;
   if (capacity(state, 'oxygen') < pop) return void tryBuild(state, 'oxygen');
   if (capacity(state, 'farm') < pop) return void tryBuild(state, 'farm');
   if (capacity(state, 'water') < pop) return void tryBuild(state, 'water');
-  if (housingCapacity(state) <= state.population + 1) return void tryBuild(state, 'habitat');
-  if (count(state, 'dock') === 0 && state.cycle >= 6) return void tryBuild(state, 'dock');
-  if (count(state, 'commons') === 0 && state.morale < 55) return void tryBuild(state, 'commons');
+  if (housingCapacity(state) <= eco.population + 1) return void tryBuild(state, 'habitat');
   if (count(state, 'battery') === 0) return void tryBuild(state, 'battery');
 }
 
 function planWorkers(state) {
-  // Reorganiza todo mundo do zero a cada ciclo.
-  for (const m of state.modules) m.workers = 0;
-  state.maintenance = 0;
+  // Reorganiza todo mundo do zero a cada dia, sempre olhando a previsão real.
+  for (const r of state.residents) if (canWork(r) || r.job) r.job = null;
+  syncWorkers(state);
 
-  const pop = state.population;
+  const pop = inBase(state).length + 1;
   const ration = state.decrees.rationing ? 0.75 : 1;
-  const target = (key, perPerson) => {
+  const want = (key, perPerson) => {
     const need = pop * perPerson;
-    return state.resources[key] > need * 4 ? need - 3 : need + 1;
+    return state.resources[key] > need * 4 ? need * 0.9 : need + 2;
   };
-  const fill = (type, needed) => {
-    let produced = 0;
+  const fillUntil = (type, done) => {
     for (const m of state.modules.filter((x) => x.type === type && x.buildLeft === 0)) {
-      while (produced < needed && m.workers < MODULES[type].slots && idleWorkers(state) > 0) {
-        assignWorker(state, m.id, 1);
-        produced += MODULES[type].rate;
+      while (!done() && m.workers < MODULES[type].slots && idleWorkers(state) > 0) {
+        if (!assignWorker(state, m.id, 1).ok) break;
       }
     }
   };
-  fill('oxygen', target('oxygen', 1));
-  fill('water', target('water', ration));
-  fill('farm', target('food', ration));
-  const energyGap = () => -computeEconomy(state).energy.net;
-  fill('tidal', Math.max(0, energyGap()) + 1);
-  fill('geothermal', Math.max(0, energyGap()) + 1);
+  const eco = () => computeEconomy(state);
+  fillUntil('oxygen', () => eco().production.oxygen >= want('oxygen', 1));
+  fillUntil('water', () => eco().production.water >= want('water', ration));
+  fillUntil('farm', () => eco().production.food >= want('food', ration));
+  fillUntil('geothermal', () => eco().energy.net >= 1);
+  fillUntil('tidal', () => eco().energy.net >= 1);
+  fillUntil('clinic', () => state.modules.some((m) => m.type === 'clinic' && m.workers > 0));
 
-  const wear = computeEconomy(state).hull.wear;
-  const crew = state.hull < 97 ? Math.ceil((wear + (state.hull < 70 ? 2 : 0)) / 1.5) : 0;
-  for (let i = 0; i < crew && idleWorkers(state) > 0; i++) setMaintenance(state, 1);
+  const target = state.hull < 95 ? eco().hull.wear + (state.hull < 70 ? 2 : 0.5) : eco().hull.wear;
+  while (eco().hull.repair < target && idleWorkers(state) > 0) {
+    if (!setMaintenance(state, 1).ok) break;
+  }
   const reserve = state.expedition ? 0 : 2;
-  fill('workshop', Math.max(0, idleWorkers(state) - reserve) * MODULES.workshop.rate);
+  const spare = Math.max(0, idleWorkers(state) - reserve);
+  fillUntil('workshop', () => idleWorkers(state) <= idleWorkers(state) - spare || idleWorkers(state) <= reserve);
 }
 
 function planDecrees(state) {
   const eco = computeEconomy(state);
-  const wantRation = eco.after.food < 15 || eco.after.water < 15;
+  const wantRation = eco.after.food < 20 || eco.after.water < 20;
   if (state.decrees.rationing !== wantRation) toggleDecree(state, 'rationing');
-  const wantBirths = state.morale >= 55 && state.cycle > 10;
-  if (state.decrees.birthLicenses !== wantBirths) toggleDecree(state, 'birthLicenses');
 }
 
 function planExpedition(state) {
-  if (state.resources.oxygen < 50) return;
-  const team = Math.min(2, idleWorkers(state));
-  if (team > 0 && canLaunchExpedition(state, 'rift', team).ok) launchExpedition(state, 'rift', team);
+  if (state.resources.oxygen < 60 || state.resources.materials > 150) return;
+  const team = Math.min(2, idleWorkers(state) + 1);
+  if (team > 0 && canLaunchExpedition(state, 'wreck', team).ok) launchExpedition(state, 'wreck', team);
 }
 
-export function runBot(strategy, seed, maxCycles = 80) {
+export function runBot(strategy, seed, maxDays = 60) {
   const state = createGame(seed);
-  while (state.status === 'playing' && state.cycle <= maxCycles) {
+  while (state.status === 'playing' && state.cycle <= maxDays) {
     strategies[strategy](state);
     if (state.status !== 'playing') break;
     const result = endCycle(state);
@@ -164,22 +166,23 @@ export function runBot(strategy, seed, maxCycles = 80) {
   return state;
 }
 
-function summarize(strategy, games, maxCycles) {
+function summarize(strategy, games, maxDays) {
   const results = [];
-  for (let seed = 1; seed <= games; seed++) results.push(runBot(strategy, seed, maxCycles));
-  const won = results.filter((s) => s.status === 'won').length;
+  for (let seed = 1; seed <= games; seed++) results.push(runBot(strategy, seed, maxDays));
   const lost = results.filter((s) => s.status === 'lost');
   const alive = results.filter((s) => s.status === 'playing').length;
   const causes = {};
   for (const s of lost) causes[s.outcome.key] = (causes[s.outcome.key] || 0) + 1;
   const avg = (fn) => (results.reduce((a, s) => a + fn(s), 0) / results.length).toFixed(1);
-  console.log(`\n== ${strategy} (${games} partidas, até ${maxCycles} ciclos)`);
-  console.log(`vitórias ${won} · derrotas ${lost.length} ${JSON.stringify(causes)} · vivas no limite ${alive}`);
-  console.log(`ciclo final médio ${avg((s) => s.cycle)} · fragmentos ${avg((s) => s.fragments)} · população ${avg((s) => s.population)} · perdas ${avg((s) => s.stats.deaths)}`);
+  console.log(`\n== ${strategy} (${games} partidas, até o dia ${maxDays})`);
+  console.log(`sobreviveram ${alive} · derrotas ${lost.length} ${JSON.stringify(causes)}`);
+  console.log(
+    `dia final médio ${avg((s) => s.cycle)} · população ${avg((s) => s.residents.filter((r) => r.alive).length)} · mortes ${avg((s) => s.stats.deaths)} · moral ${avg((s) => s.morale)} · confiança ${avg((s) => s.trust)} · vazamentos ${avg((s) => s.stats.leaks)}`,
+  );
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const games = Number(process.argv[2] || 200);
-  const maxCycles = Number(process.argv[3] || 80);
-  for (const strategy of Object.keys(strategies)) summarize(strategy, games, maxCycles);
+  const games = Number(process.argv[2] || 100);
+  const maxDays = Number(process.argv[3] || 60);
+  for (const strategy of Object.keys(strategies)) summarize(strategy, games, maxDays);
 }
