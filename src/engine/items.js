@@ -97,6 +97,11 @@ export const ITEMS = {
     desc: 'Tinta anticorrosiva, quase vazia. Tem graxa da turbina no fundo.',
     category: 'quest',
   },
+  'traje-velho': {
+    name: 'Traje de mergulho nº 3',
+    desc: 'Um escafandro remendado, com válvula de alívio nova. Ícaro pediu: cinco metros por minuto, nem um a mais.',
+    category: 'quest',
+  },
   'codigo-cofre': {
     name: 'Código do cofre',
     desc: 'Seis números escritos com letra trêmula no verso de uma receita.',

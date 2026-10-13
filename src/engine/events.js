@@ -235,7 +235,7 @@ export const RANDOM_EVENTS = {
   },
   sabotage: {
     title: 'Sabotagem',
-    when: (s) => s.trust < 38 || discontentShare(s) > 0.3,
+    when: (s) => !s.flags.noSabotage && (s.trust < 38 || discontentShare(s) > 0.3),
     speaker: (s) => alive(s, 'marta') || someone(s, (r) => r.role === 'guard', 'guard2'),
     text: (s, d) => `${d.speaker ? N(s, d.speaker) : 'A guarda'} acorda você antes do turno: alguém afrouxou as válvulas do Eletrolisador durante a noite. Na parede, a palavra SUBIR pintada com graxa.`,
     choices: [

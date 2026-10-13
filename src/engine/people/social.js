@@ -312,7 +312,8 @@ export function spreadRumors(state) {
   const leaked = [];
   for (const rumor of state.rumors) {
     if (rumor.public) continue;
-    const tellers = rumor.knownBy.map((id) => residentById(state, id)).filter((r) => r && r.alive && !r.away);
+    const silenced = rumor.silenced || [];
+    const tellers = rumor.knownBy.map((id) => residentById(state, id)).filter((r) => r && r.alive && !r.away && !silenced.includes(r.id));
     for (const teller of tellers) {
       const p = (0.025 + 0.14 * teller.personality.gossip) * factor * (rumor.kind === 'secret' ? 0.8 : 1);
       for (const contact of contactsOf(state, teller)) {

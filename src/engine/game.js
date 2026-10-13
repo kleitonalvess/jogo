@@ -111,6 +111,8 @@ export function createGame(seed = createSeed(), options = {}) {
       reputation: { truth: 0, mercy: 0 },
       known: {},
       talkedToday: [],
+      giftsToday: [],
+      rumorsKnown: [],
       suitTank: 100,
     },
     stats: { deaths: 0, births: 0, expeditions: 0, leaks: 0, conversations: 0, gifts: 0 },
@@ -837,6 +839,7 @@ export function endCycle(state) {
   state.cycle += 1;
   state.time.minute = 6 * 60;
   state.player.talkedToday = [];
+  state.player.giftsToday = [];
   pruneGatherings(state);
   syncWorkers(state);
   refreshAggregates(state);
