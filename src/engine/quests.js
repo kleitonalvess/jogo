@@ -566,6 +566,19 @@ function optionsFor(state, r) {
     });
   }
 
+  // Ícaro vai junto lá fora.
+  if (k === 'icaro' && state.flags.companionDay !== state.cycle && state.modules.some((m) => m.type === 'dock' && m.buildLeft === 0)) {
+    add('icaro:junto', 'Vem comigo lá fora?', (s) => {
+      if (r.opinion < 45) {
+        nudge(s, 'icaro', -1);
+        return { lines: ['Hoje não. (Continua consertando a válvula.) Lá fora a gente só confia em quem já conhece.'] };
+      }
+      s.flags.companionDay = s.cycle;
+      nudge(s, 'icaro', 2, 'Foi chamado para mergulhar junto.');
+      return { lines: ['(Já está pegando o capacete.) Achei que você não ia pedir nunca. Te espero na eclusa. E não se afaste mais de dez metros de mim.'], end: true };
+    });
+  }
+
   // Pedidos do dia a dia
   for (const f of state.favors || []) {
     if (f.done) continue;
@@ -930,6 +943,14 @@ export function objectives(state) {
   add('augusto', 'Augusto Mendonça quer conversar.', 'augusto');
   add('zuleica', hasItem(state, 'pimenta') ? 'Leve a pimenta para Dona Zu.' : 'Procure um tempero na cozinha de um submarino dos destroços.', hasItem(state, 'pimenta') ? 'zuleica' : null, hasItem(state, 'pimenta') ? null : 'wreck');
   for (const f of state.favors || []) if (!f.done) out.push({ quest: 'favor', text: f.text, target: null, favor: true });
+  const minute = state.time.minute % 1440;
+  for (const g of state.gatherings || []) {
+    if (g.day !== state.cycle || minute >= g.end || g.spoken) continue;
+    const hh = (m) => `${String(Math.floor(m / 60)).padStart(2, '0')}h${m % 60 ? String(m % 60).padStart(2, '0') : ''}`;
+    const labels = { funeral: 'Velório', assembly: 'Leitura do documento', wedding: 'Casamento', birth: 'Boas-vindas ao bebê', feast: 'Banquete' };
+    const who = typeof g.about === 'number' ? residentById(state, g.about) : null;
+    out.push({ quest: 'gathering', text: `${labels[g.kind] || 'Reunião'}${who ? ` de ${displayName(who)}` : ''} no Átrio, ${hh(g.start)}–${hh(g.end)}.`, target: null });
+  }
   return out;
 }
 

@@ -172,3 +172,44 @@ test('dormir só à noite; vazamentos aparecem com o casco fraco e custam materi
   assert.equal(s.resources.materials, mats - 2);
   assert.equal(leaksToday(s).length, leaks.length - 1);
 });
+
+test('velório: a morte marca uma reunião no Átrio e o discurso comove a família uma vez só', async () => {
+  const { recordDeath } = await import('../src/engine/people/social.js');
+  const { gatheringsNow, gatheringTitle, speakAtGathering } = await import('../src/engine/world.js');
+  const s = world(5);
+  const dead = s.residents.find((r) => !r.key && r.alive && Object.keys(r.kin).length > 0);
+  assert.ok(dead, 'alguém com família');
+  recordDeath(s, dead, 'fever');
+  const g = s.gatherings.find((x) => x.kind === 'funeral' && x.about === dead.id);
+  assert.ok(g, 'velório marcado');
+  assert.equal(g.day, s.cycle + 1);
+  s.cycle = g.day;
+  s.time.minute = g.start + 10;
+  assert.ok(gatheringsNow(s).some((x) => x.id === g.id));
+  assert.match(gatheringTitle(s, g), new RegExp(dead.first));
+  const kinId = Number(Object.keys(dead.kin).find((id) => s.residents.find((r) => r.id === Number(id)).alive));
+  const kin = s.residents.find((r) => r.id === kinId);
+  kin.opinion = 50;
+  const first = speakAtGathering(s, g);
+  assert.ok(first.ok);
+  assert.ok(kin.opinion > 50, 'a família agradece');
+  assert.ok(kin.memories.some((m) => /velório/.test(m.text)));
+  const before = kin.opinion;
+  assert.equal(speakAtGathering(s, g).ok, false);
+  assert.equal(kin.opinion, before);
+  s.time.minute = g.end + 5;
+  assert.ok(!gatheringsNow(s).some((x) => x.id === g.id));
+});
+
+test('Ícaro só mergulha junto com quem ele confia, e uma vez por dia', () => {
+  const s = world(7);
+  const icaro = residentByKey(s, 'icaro');
+  icaro.opinion = 30;
+  let conv = talk(s, 'icaro', 'Vem comigo');
+  assert.notEqual(s.flags.companionDay, s.cycle);
+  icaro.opinion = 70;
+  conv = talk(s, 'icaro', 'Vem comigo');
+  assert.equal(s.flags.companionDay, s.cycle);
+  const again = openConversation(s, icaro.id);
+  assert.ok(!again.options.some((o) => o.label.startsWith('Vem comigo')));
+});

@@ -8,14 +8,21 @@ import { createCharacter, disposeCharacter } from './character.js';
 
 const SIZE = 128;
 
+// Fora da tela o three.js grava cores lineares; a imagem final precisa de sRGB.
+const TO_SRGB = new Uint8ClampedArray(256);
+for (let i = 0; i < 256; i++) {
+  const c = i / 255;
+  TO_SRGB[i] = Math.round(255 * (c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055));
+}
+
 export class Portraits {
   constructor(renderer) {
     this.renderer = renderer;
     this.cache = new Map();
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color('#0f2229');
-    this.scene.add(new THREE.AmbientLight('#9ab4bb', 1.6));
-    const key = new THREE.DirectionalLight('#ffdcae', 2.6);
+    this.scene.add(new THREE.AmbientLight('#9ab4bb', 1.1));
+    const key = new THREE.DirectionalLight('#ffdcae', 2.2);
     key.position.set(1.2, 1.6, 2);
     this.scene.add(key);
     const rim = new THREE.DirectionalLight('#7fd0d8', 1.4);
@@ -23,7 +30,6 @@ export class Portraits {
     this.scene.add(rim);
     this.camera = new THREE.PerspectiveCamera(24, 1, 0.05, 10);
     this.target = new THREE.WebGLRenderTarget(SIZE, SIZE);
-    this.target.texture.colorSpace = THREE.SRGBColorSpace;
     this.pixels = new Uint8Array(SIZE * SIZE * 4);
     this.canvas = document.createElement('canvas');
     this.canvas.width = SIZE;
@@ -57,7 +63,13 @@ export class Portraits {
     const image = this.ctx.createImageData(SIZE, SIZE);
     for (let y = 0; y < SIZE; y++) {
       const src = (SIZE - 1 - y) * SIZE * 4;
-      image.data.set(this.pixels.subarray(src, src + SIZE * 4), y * SIZE * 4);
+      const dst = y * SIZE * 4;
+      for (let i = 0; i < SIZE * 4; i += 4) {
+        image.data[dst + i] = TO_SRGB[this.pixels[src + i]];
+        image.data[dst + i + 1] = TO_SRGB[this.pixels[src + i + 1]];
+        image.data[dst + i + 2] = TO_SRGB[this.pixels[src + i + 2]];
+        image.data[dst + i + 3] = 255;
+      }
     }
     this.ctx.putImageData(image, 0, 0);
     const url = this.canvas.toDataURL('image/png');

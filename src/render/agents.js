@@ -282,7 +282,21 @@ export class Agents {
       root.rotation.y = turnToward(root.rotation.y, agent.settleFace, dt * 5);
     }
     if (agent.bubble && agent.bubble.until > performance.now() && agent.arrived && anim !== 'lie' && anim !== 'sit') anim = 'talk';
-    if (root.visible) animateCharacter(agent.ch, dt, anim);
+    if (root.visible) {
+      animateCharacter(agent.ch, dt, anim);
+      // Quem está parado acompanha o jogador com o olhar.
+      if (player && anim !== 'lie' && agent.level === player.level) {
+        const dx = player.position.x - root.position.x;
+        const dz = player.position.z - root.position.z;
+        const d = Math.hypot(dx, dz);
+        if (d < 3.2 && d > 0.3) {
+          let rel = Math.atan2(dx, dz) - root.rotation.y;
+          while (rel > Math.PI) rel -= Math.PI * 2;
+          while (rel < -Math.PI) rel += Math.PI * 2;
+          if (Math.abs(rel) < 2.0) agent.ch.head.rotation.y = Math.max(-1, Math.min(1, rel)) * 0.85;
+        }
+      }
+    }
   }
 
   updateVisibility(player) {
@@ -292,13 +306,21 @@ export class Agents {
     }
   }
 
-  // Conversas espontâneas entre moradores próximos.
+  // Conversas espontâneas entre moradores próximos: às vezes sozinho,
+  // às vezes em dupla, com pergunta e resposta.
   chatter(dt, state, player) {
     const now = performance.now();
     this.bubbles = this.bubbles.filter((b) => b.until > now);
     for (const agent of this.agents.values()) {
+      if (agent.pending && agent.pending.at <= now) {
+        agent.bubble = { text: agent.pending.text, until: now + 4200 };
+        this.bubbles.push({ agent, text: agent.pending.text, until: now + 4200 });
+        agent.pending = null;
+      }
+    }
+    for (const agent of this.agents.values()) {
       agent.nextChat -= dt;
-      if (agent.nextChat > 0 || !agent.arrived || agent.held) continue;
+      if (agent.nextChat > 0 || !agent.arrived || agent.held || agent.pending) continue;
       agent.nextChat = 9 + hash01(agent.id, now) * 14;
       if (agent.level !== player.level) continue;
       const pos = agent.ch.root.position;
@@ -307,11 +329,45 @@ export class Agents {
       const plan = agent.plan;
       if (!plan || plan.activity === 'sleep' || plan.activity === 'sick' || plan.activity === 'detained') continue;
       const r = residentById(state, agent.id);
+      const partner = this.partnerFor(agent, state);
+      if (partner && hash01(agent.id, partner.id, Math.floor(now / 1000)) < 0.65) {
+        const o = residentById(state, partner.id);
+        const pair = exchangeFor(state, r, o, now);
+        if (pair) {
+          this.say(agent, pair[0], now);
+          partner.pending = { text: pair[1], at: now + 2300 };
+          partner.nextChat = 12;
+          const face = (a, b) => Math.atan2(b.ch.root.position.x - a.ch.root.position.x, b.ch.root.position.z - a.ch.root.position.z);
+          if (agent.target && agent.target.pose !== 'lie') agent.settleFace = face(agent, partner);
+          if (partner.target && partner.target.pose !== 'lie' && partner.target.pose !== 'sit') partner.settleFace = face(partner, agent);
+          continue;
+        }
+      }
       const line = barkFor(state, r, plan, dPlayer < 3.5, now);
-      if (!line) continue;
-      agent.bubble = { text: line, until: now + 4200 };
-      this.bubbles.push({ agent, text: line, until: now + 4200 });
+      if (line) this.say(agent, line, now);
     }
+  }
+
+  say(agent, text, now) {
+    agent.bubble = { text, until: now + 4200 };
+    this.bubbles.push({ agent, text, until: now + 4200 });
+  }
+
+  partnerFor(agent, state) {
+    const p = agent.ch.root.position;
+    let best = null;
+    let bestD = 2.6;
+    for (const other of this.agents.values()) {
+      if (other === agent || !other.arrived || other.held || other.pending || other.level !== agent.level) continue;
+      if (!other.plan || other.plan.activity === 'sleep' || other.plan.activity === 'sick') continue;
+      const d = other.ch.root.position.distanceTo(p);
+      if (d < bestD) {
+        bestD = d;
+        best = other;
+      }
+    }
+    void state;
+    return best;
   }
 
   // Segura um morador parado (por exemplo, numa conversa com o jogador).
@@ -403,6 +459,44 @@ const ACTIVITY_LINES = {
   patrol: ['Tudo em ordem por aqui.', 'Circulando, pessoal.'],
   gather: ['Que pena. Era uma pessoa boa.', 'Que dia.', 'Vem gente lá de baixo também.'],
 };
+
+const EXCHANGES = [
+  ['Viu o cardume ontem?', 'Vi! Parecia chuva de prata.'],
+  ['Você acha que o casco aguenta mais dez anos?', 'Tem que aguentar. Não tem outro.'],
+  ['O que tem de janta hoje?', 'Adivinha. Começa com "al" e termina com "ga".'],
+  ['Dizem que a turbina vai parar de novo.', 'Dizem muita coisa. Ela gira desde antes de eu nascer.'],
+  ['Sonhei com o céu de novo.', 'E como era dessa vez?'],
+  ['Minha filha perguntou o que é vento.', 'E o que você respondeu?'],
+  ['Quanto tempo você acha que a gente ainda fica aqui?', 'A vida inteira. A minha, pelo menos.'],
+  ['Me empresta a chave catorze?', 'De novo? Você nunca devolve.'],
+  ['A Dona Zu tá de bom humor hoje.', 'Então hoje tem krill com casca.'],
+  ['Você conhecia o Bastos?', 'Todo mundo conhecia. Era teimoso feito válvula emperrada.'],
+  ['Ouvi dizer que tem uma baleia morta lá fora.', 'O Ícaro diz que os bichos comem ela faz meses.'],
+  ['Vai no Átrio mais tarde?', 'Se a Marta não inventar ronda.'],
+  ['Você acredita nos Fundadores?', 'Acredito que eles estavam com medo. Como a gente.'],
+  ['Tá sentindo esse cheiro de óleo?', 'É o cheiro de casa.'],
+  ['Me ensina a jogar dominó direito?', 'Primeiro aprende a perder.'],
+  ['Você já pensou em sair pela eclusa?', 'Todo dia. E todo dia eu fico.'],
+];
+
+function exchangeFor(state, a, b, salt) {
+  const contextual = [];
+  if (state.resources.oxygen < 40) contextual.push(['O ar está pesado, não está?', 'Respira devagar. Ajuda.']);
+  if (state.resources.food < 40) contextual.push(['Mais um dia de meia porção.', 'Meu estômago já desistiu de reclamar.']);
+  if (state.hull < 50) contextual.push(['Ouviu o estalo de madrugada?', 'Ouvi. Não dormi mais.']);
+  const griefB = b.memories.find((m) => m.kind === 'grief' && state.cycle - m.day <= 5);
+  if (griefB) {
+    const lost = residentById(state, griefB.about);
+    if (lost) contextual.push([`Sinto muito ${lost.g === 'f' ? 'pela' : 'pelo'} ${displayName(lost)}.`, 'Obrigad' + gw(b, 'a', 'o', 'e') + '. Ainda não caiu a ficha.']);
+  }
+  if (state.rumors.some((x) => x.kind === 'secret' && !x.public && x.knownBy.includes(a.id))) contextual.push(['Você ouviu o que dizem do Conselho?', '(Olha em volta.) Fala baixo.']);
+  if ((a.bonds[b.id] || 0) <= -30) contextual.push(['(Resmunga alguma coisa.)', 'O que foi que você disse?']);
+  if (a.kin[b.id] === 'child') contextual.push(['Já comeu direito hoje?', 'Já! Duas vezes!']);
+  const title = reputationTitle(state);
+  if (title) contextual.push([`Viu como chamam o novo Superintendente? "${title.title}".`, 'Combina, não combina?']);
+  const pool = contextual.length && hash01(a.id, b.id, salt) < 0.6 ? contextual : EXCHANGES;
+  return hashPick(pool, a.id, b.id, Math.floor(salt / 5000));
+}
 
 function barkFor(state, r, plan, nearPlayer, salt) {
   const voice = r.key ? VOICES[r.key] : null;

@@ -461,6 +461,11 @@ kbd {
   .app.playing .prompt {
     bottom: calc(170px + var(--safe-b));
   }
+
+  .prompt kbd,
+  .hud-br kbd {
+    display: none;
+  }
 }
 
 .touch .look {
@@ -2097,20 +2102,35 @@ tr.crit th {
 
 @media (max-width: 600px) {
   .hud-tr {
-    top: calc(64px + var(--safe-t));
     right: auto;
     left: calc(14px + var(--safe-l));
     max-width: calc(100% - 28px);
     text-align: left;
   }
 
-  .hud-bl {
-    display: none;
+  .hud-tr {
+    top: calc(112px + var(--safe-t));
   }
 
-  .hud-br {
+  .hud-bl {
+    top: calc(62px + var(--safe-t));
+    bottom: auto;
+    max-width: calc(100% - 28px);
+  }
+
+  .mini {
+    padding: 2px 5px;
+    font-size: 11px;
+  }
+
+  .hud-br,
+  .app.playing .hud-br {
     top: calc(12px + var(--safe-t));
     bottom: auto;
+  }
+
+  .toast {
+    top: calc(150px + var(--safe-t));
   }
 
   .plan-row {

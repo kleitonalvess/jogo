@@ -11,8 +11,9 @@ import { chooseOption, openConversation } from './engine/dialogue.js';
 import { canAfford, currentEvent, deserialize, eventDef, eventSpeaker, resolveEvent, serialize } from './engine/game.js';
 import { displayName, fullName, residentById, residentByKey } from './engine/people/population.js';
 import { objectives } from './engine/quests.js';
-import { EXTERIOR, SUIT, availableItems, canSleep, clock, createWorld, depositScrap, endDay, interact, leaksToday, patchLeak, pickUp, tick, useAirCache } from './engine/world.js';
+import { EXTERIOR, SUIT, availableItems, canSleep, clock, createWorld, depositScrap, endDay, gatheringTitle, gatheringsNow, interact, leaksToday, patchLeak, pickUp, speakAtGathering, tick, useAirCache } from './engine/world.js';
 import { Agents } from './render/agents.js';
+import { animateCharacter, createCharacter } from './render/character.js';
 import { useLightMaterials } from './render/geometry.js';
 import { ColonyView } from './render/colony.js';
 import { BOUNDS, ExteriorView, groundHeight } from './render/exterior.js';
@@ -29,6 +30,16 @@ import { renderTerminal, setJobFromSelect, terminalAction } from './ui/terminal.
 const SAVE_KEY = 'nadir.save.v2';
 const SETTINGS_KEY = 'nadir.settings.v1';
 const LIGHT_POOL = 8;
+const COMPANION_LINES = [
+  'Cuidado com a borda da Fenda. Ela engana.',
+  'Ouviu? É o casco da colônia estalando. Daqui de fora parece um gemido.',
+  'A baleia fica a noroeste. Os bichos vão estar lá, comendo.',
+  'Respira devagar. O tanque agradece.',
+  'Quando a luz do capacete pega um peixe-lanterna, parece que o mar pisca.',
+  'A Ruth adorava esse silêncio. Eu demorei para gostar.',
+  'Se a água esquentar de repente, você está perto demais de uma fonte.',
+  'As balizas foram postas pelos Fundadores. Algumas ainda funcionam.',
+];
 
 function storageGet(key) {
   try {
@@ -80,8 +91,9 @@ export class App {
     this.colonyScene = new THREE.Scene();
     this.colonyScene.background = new THREE.Color('#071419');
     this.colonyScene.fog = new THREE.FogExp2('#0a1a20', 0.028);
-    this.colonyScene.add(new THREE.AmbientLight('#4a6670', 1.35));
-    this.colonyScene.add(new THREE.HemisphereLight('#a7c7cf', '#251c14', 0.9));
+    this.ambient = new THREE.AmbientLight('#4a6670', 1.35);
+    this.hemi = new THREE.HemisphereLight('#a7c7cf', '#251c14', 0.9);
+    this.colonyScene.add(this.ambient, this.hemi);
     this.lights = [];
     for (let i = 0; i < LIGHT_POOL; i++) {
       const l = new THREE.PointLight('#ffd29a', 0, 13, 1.5);
@@ -165,6 +177,8 @@ export class App {
     this.renderer.setPixelRatio(ratio);
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
+    // Celular em pé: abre o campo de visão para não ficar só a nuca na tela.
+    this.camera.fov = w / h < 0.8 ? 78 : 62;
     this.camera.updateProjectionMatrix();
     this.width = w;
     this.height = h;
@@ -469,20 +483,22 @@ export class App {
     this.audio.setZone('colony');
   }
 
-  // Acorda ao lado do beliche, de frente para o meio do Núcleo.
+  // Começa o dia no corredor central do Núcleo, a poucos passos do beliche,
+  // olhando para dentro do salão. A câmera fica livre, atrás, na porta.
   placePlayerAtBed() {
-    const bed = this.colony.interactables.find((i) => i.id === 'bed');
     const core = this.state.modules.find((m) => m.type === 'core');
-    const center = roomToWorld(core.level, core.slot, 6, 0);
-    const facing = Math.atan2(center.x - bed.x, center.z - bed.z);
-    this.player.placeAt(bed.x, floorY(core.level), bed.z, core.level, facing);
+    const at = roomToWorld(core.level, core.slot, 2.6, -1.0);
+    const ahead = roomToWorld(core.level, core.slot, 6, -0.4);
+    const facing = Math.atan2(ahead.x - at.x, ahead.z - at.z);
+    this.player.placeAt(at.x, floorY(core.level), at.z, core.level, facing);
+    this.player.pitch = 0.32;
     this.player.camPos.set(0, 0, 0);
   }
 
   beginPlay(fresh = true) {
     this.setMode('play');
     this.renderHud(true);
-    if (fresh) this.toast(['Você acorda no Núcleo do Conselho, no Nível 1.', 'Fale com Augusto Mendonça. Use E para conversar.']);
+    if (fresh) this.toast(['Você acorda no Núcleo do Conselho, no Nível 1.', `Fale com Augusto Mendonça. ${matchMedia('(pointer: coarse)').matches ? 'Toque em Usar' : 'Use E'} para conversar.`]);
     this.checkEvents();
   }
 
@@ -647,14 +663,72 @@ export class App {
       this.player.pitch = 0.25;
       this.state.player.suitTank = this.state.player.suitTankMax;
       this.exterior.syncItems(availableItems(this.state, 'exterior'));
+      this.spawnCompanion();
       this.audio.setZone('exterior');
       this.toast(['Leito marinho, 380 metros. O tanque do traje dura alguns minutos.', 'Espaço nada para cima. Volte pela eclusa antes do ar acabar.']);
       this.fadeIn();
     });
   }
 
+  // Ícaro mergulha junto quando você pediu no mesmo dia.
+  spawnCompanion() {
+    this.removeCompanion();
+    const s = this.state;
+    const icaro = residentByKey(s, 'icaro');
+    this.icaroWith = !!(icaro && icaro.alive && !icaro.away && s.flags.companionDay === s.cycle);
+    if (!this.icaroWith) return;
+    const ch = createCharacter(icaro.appearance, 'diver', { suit: true, seed: icaro.id });
+    const p = this.player.position;
+    ch.root.position.set(p.x + 1.6, p.y, p.z + 1.2);
+    this.exterior.scene.add(ch.root);
+    this.companion = { ch, nextLine: 6, bubble: null, warned: false };
+  }
+
+  removeCompanion() {
+    if (this.companion) {
+      this.companion.ch.root.parent?.remove(this.companion.ch.root);
+      this.companion = null;
+    }
+  }
+
+  updateCompanion(dt) {
+    const c = this.companion;
+    if (!c) return;
+    const p = this.player.position;
+    const root = c.ch.root;
+    const back = new THREE.Vector3(Math.sin(this.player.ch.root.rotation.y + 2.4), 0, Math.cos(this.player.ch.root.rotation.y + 2.4)).multiplyScalar(2.2);
+    const tx = p.x + back.x;
+    const tz = p.z + back.z;
+    const dx = tx - root.position.x;
+    const dz = tz - root.position.z;
+    const d = Math.hypot(dx, dz);
+    let anim = 'idle';
+    if (d > 0.4) {
+      const speed = Math.min(4.2, d * 1.6);
+      root.position.x += (dx / d) * speed * dt;
+      root.position.z += (dz / d) * speed * dt;
+      root.rotation.y = Math.atan2(dx, dz);
+      anim = speed > 3 ? 'run' : 'walk';
+    }
+    const ground = groundHeight(root.position.x, root.position.z);
+    const targetY = Math.max(ground, p.y - 0.3);
+    root.position.y += (targetY - root.position.y) * Math.min(1, dt * 3);
+    if (root.position.y > ground + 0.4) anim = 'swim';
+    animateCharacter(c.ch, dt, anim);
+    c.nextLine -= dt;
+    const tank = this.state.player.suitTank / this.state.player.suitTankMax;
+    if (tank < 0.28 && !c.warned) {
+      c.warned = true;
+      c.bubble = { text: 'Sua válvula está assobiando. Hora de voltar. Agora.', until: performance.now() + 5000 };
+    } else if (c.nextLine <= 0) {
+      c.nextLine = 22 + Math.random() * 14;
+      c.bubble = { text: COMPANION_LINES[Math.floor(Math.random() * COMPANION_LINES.length)], until: performance.now() + 5000 };
+    }
+  }
+
   enterColony(silent = false) {
     const doIt = () => {
+      this.removeCompanion();
       this.zone = 'colony';
       this.climbing = null;
       this.player.moveTo(this.colonyScene);
@@ -682,7 +756,7 @@ export class App {
       this.enterColony(true);
       const clinic = s.modules.find((m) => m.type === 'clinic');
       this.toast([
-        icaro && icaro.alive ? 'Você apagou lá fora. Ícaro te trouxe de volta, arrastando o traje pela areia.' : 'Você apagou lá fora. Alguém da eclusa te puxou de volta.',
+        this.icaroWith ? 'Você apagou lá fora. Ícaro dividiu o ar do tanque dele e te arrastou até a eclusa.' : icaro && icaro.alive ? 'Você apagou lá fora. Ícaro saiu sozinho atrás de você e te trouxe de volta.' : 'Você apagou lá fora. Alguém da eclusa te puxou de volta.',
         clinic ? 'Acordou na Enfermaria, três horas depois.' : 'Acordou na eclusa, três horas depois.',
       ], 'warn');
       if (icaro && icaro.alive) icaro.opinion = Math.max(0, icaro.opinion - 4);
@@ -803,6 +877,7 @@ export class App {
     } else {
       this.player.updateExterior(dt, this.input, groundHeight, ex.obstacles, BOUNDS, 1);
       this.player.animate(dt);
+      this.updateCompanion(dt);
       const sprint = this.input.running() && this.player.anim === 'run';
       s.player.suitTank -= (sprint ? SUIT.sprintDrain : SUIT.drainPerSecond) * dt;
     }
@@ -844,6 +919,15 @@ export class App {
     this.lightTimer = 0.25;
     const ref = this.player && this.state ? this.player.position : this.camera.position;
     const level = this.player && this.state ? this.player.level : 0;
+    // As luzes da colônia seguem um relógio: mais fracas e azuladas à noite.
+    const m = ((this.state || this.backdrop).time.minute) % 1440;
+    let f = 1;
+    if (m >= 22 * 60 || m < 5 * 60) f = 0.42;
+    else if (m >= 20 * 60) f = 1 - ((m - 20 * 60) / 120) * 0.58;
+    else if (m < 6 * 60) f = 0.42 + ((m - 5 * 60) / 60) * 0.58;
+    this.ambient.intensity = 1.35 * (0.55 + f * 0.45);
+    this.hemi.intensity = 0.9 * f;
+    this.ambient.color.set(f < 0.7 ? '#3a5a78' : '#4a6670');
     const lamps = this.colony.lamps
       .filter((l) => Math.abs(l.level - level) <= 1)
       .map((l) => ({ l, d: Math.hypot(l.x - ref.x, (l.y - ref.y) * 2, l.z - ref.z) }))
@@ -857,7 +941,7 @@ export class App {
       }
       light.position.set(item.l.x, item.l.y, item.l.z);
       light.color.set(item.l.color);
-      light.intensity = 22 * (item.l.intensity || 1);
+      light.intensity = 22 * (item.l.intensity || 1) * f;
     }
   }
 
@@ -935,6 +1019,15 @@ export class App {
         const d = Math.hypot(l.x - p.x, l.z - p.z);
         if (d < 1.9) cands.push({ kind: 'leak', id: l.id, d, label: 'Remendar o vazamento (2 MAT)', pos: l });
       }
+      const gathering = gatheringsNow(this.state).find((g) => !g.spoken);
+      if (gathering) {
+        const region = regionAt(indexModules(this.state.modules), level, p.x, p.z, 0);
+        const hall = this.state.modules.find((m) => m.type === 'commons' && m.buildLeft === 0) || this.state.modules.find((m) => m.type === 'core');
+        // Para discursar, vá ao centro do salão (perto do jardim do Átrio).
+        const center = hall.type === 'commons' ? roomToWorld(hall.level, hall.slot, 5.5, 0) : roomToWorld(hall.level, hall.slot, 7, 0);
+        const dc = Math.hypot(center.x - p.x, center.z - p.z);
+        if (region && region.module && region.module.id === hall.id && dc < 3.6) cands.push({ kind: 'speech', id: gathering.id, d: 0.01, label: `Tomar a palavra: ${gatheringTitle(this.state, gathering)}` });
+      }
       if (this.paintMesh) {
         const pp = this.paintMesh.position;
         const d = Math.hypot(pp.x - p.x, pp.z - p.z);
@@ -1011,6 +1104,14 @@ export class App {
         if (res.fragment) this.checkEvents();
         return;
       }
+      case 'speech': {
+        const g = s.gatherings.find((x) => x.id === t.id);
+        if (g) {
+          const res = speakAtGathering(s, g);
+          this.toast([res.text], res.ok ? 'good' : 'warn');
+        }
+        return;
+      }
       case 'air': {
         const res = useAirCache(s, t.id);
         this.toast([res.text], res.ok ? 'good' : 'warn');
@@ -1069,7 +1170,7 @@ export class App {
     if (this.player.onStair) return `Escada central · −${Math.round(160 - p.y * 8)} m`;
     const region = regionAt(indexModules(this.state.modules), this.player.level, p.x, p.z, 0);
     const lv = `Nível ${this.player.level + 1}`;
-    if (region && (region.kind === 'room' || region.kind === 'door')) return `${lv} · ${MODULES[region.module.type].name}`;
+    if (region && region.module) return `${lv} · ${MODULES[region.module.type].name}`;
     return `${lv} · Corredor`;
   }
 
@@ -1168,6 +1269,9 @@ export class App {
     }
     if (s && this.player && this.zone === 'exterior' && this.mode === 'play' && this.exterior) {
       const p = this.player.position;
+      const c = this.companion;
+      if (c && c.bubble && c.bubble.until > performance.now()) ov.tag(this.camera, c.ch.root.position, esc(c.bubble.text), 'bubble', this.width, this.height, 2.3);
+      else if (c && c.ch.root.position.distanceTo(p) < 8) ov.tag(this.camera, c.ch.root.position, '<b>Ícaro</b>', 'nametag', this.width, this.height, 2.2);
       for (const [, obj] of this.exterior.items) {
         const d = obj.position.distanceTo(p);
         if (d < 9 && obj.userData.worldItem) {

@@ -6,6 +6,8 @@ import { MODULES } from './data.js';
 import { addLog, createGame, discoverFragment, endCycle, giveItem, hasItem, takeItem } from './game.js';
 import { ITEMS } from './items.js';
 import { initQuests, onDayStart, onInteract, onPickup, worldItemVisible } from './quests.js';
+import { displayName, living, residentById } from './people/population.js';
+import { activeGatherings, adjustReputation, refreshAggregates, remember, shiftMood } from './people/social.js';
 import { hash01 } from './rng.js';
 import { clockLabel } from './text.js';
 
@@ -233,4 +235,65 @@ export function moduleName(type) {
 
 export function hasRelic(state, id) {
   return hasItem(state, id);
+}
+
+// ---------------------------------------------------------------------------
+// Reuniões: velórios, leituras de documentos, casamentos, nascimentos.
+
+export const GATHERING_LABELS = {
+  funeral: 'Velório',
+  assembly: 'Leitura do documento',
+  wedding: 'Casamento',
+  birth: 'Boas-vindas ao bebê',
+  feast: 'Banquete',
+};
+
+export function gatheringsNow(state) {
+  return activeGatherings(state, state.cycle, state.time.minute % 1440);
+}
+
+export function gatheringTitle(state, g) {
+  const who = g.about && typeof g.about === 'number' ? residentById(state, g.about) : null;
+  const label = GATHERING_LABELS[g.kind] || 'Reunião';
+  return who ? `${label} de ${displayName(who)}` : label;
+}
+
+// Você toma a palavra numa reunião. Cada tipo mexe com gente diferente.
+export function speakAtGathering(state, g) {
+  if (g.spoken) return { ok: false, text: 'Você já falou nesta reunião.' };
+  g.spoken = true;
+  const who = typeof g.about === 'number' ? residentById(state, g.about) : null;
+  const nudge = (r, delta, text) => {
+    if (!r || !r.alive) return;
+    r.opinion = Math.min(100, Math.max(0, r.opinion + delta));
+    if (text) remember(r, { day: state.cycle, kind: 'player', text, weight: delta });
+  };
+  let text = '';
+  if (g.kind === 'funeral' && who) {
+    for (const r of living(state)) {
+      if (r.kin[who.id]) nudge(r, 9, `Ouviu você falar no velório de ${displayName(who)}.`);
+      else nudge(r, 1);
+    }
+    shiftMood(state, 1);
+    adjustReputation(state, { mercy: 2 });
+    text = `Você fala sobre ${displayName(who)}: o trabalho, as manias, o que fica. A família agradece em silêncio.`;
+  } else if (g.kind === 'assembly') {
+    for (const r of living(state)) nudge(r, r.personality.truth > 0.2 ? 3 : r.personality.truth < -0.2 ? -1 : 1);
+    adjustReputation(state, { truth: 2 });
+    text = 'Você lê o documento em voz alta no Átrio. Ninguém fala por um longo tempo. Depois, todos falam ao mesmo tempo.';
+  } else if (g.kind === 'wedding' && who) {
+    nudge(who, 6, 'Ouviu você celebrar a união.');
+    for (const [id, kind] of Object.entries(who.kin)) if (kind === 'spouse') nudge(residentById(state, Number(id)), 6, 'Ouviu você celebrar a união.');
+    shiftMood(state, 1);
+    text = 'Você celebra a união com as palavras de sempre: "que o ar nunca falte a vocês". Alguém começa a cantar.';
+  } else if (g.kind === 'birth' && who) {
+    for (const [id, kind] of Object.entries(who.kin)) if (kind === 'parent') nudge(residentById(state, Number(id)), 6, 'Ouviu você dar as boas-vindas ao bebê.');
+    shiftMood(state, 1);
+    text = `Você segura ${displayName(who)} no colo diante de todos. O bebê agarra seu dedo e não solta.`;
+  } else {
+    shiftMood(state, 1);
+    text = 'Você ergue um copo de água e agradece a quem cozinhou. Aplausos.';
+  }
+  refreshAggregates(state);
+  return { ok: true, text };
 }

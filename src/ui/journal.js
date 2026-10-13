@@ -48,7 +48,7 @@ export function renderJournal(state, ui, portrait) {
 function renderQuests(state) {
   const active = objectives(state);
   const list = active.length
-    ? active.map((o) => `<li class="${o.main ? 'main' : ''}"><span class="obj-dot"></span><div><b>${esc(o.quest === 'favor' ? 'Pedido' : QUESTS[o.quest].title)}</b><p>${esc(o.text)}</p></div></li>`).join('')
+    ? active.map((o) => `<li class="${o.main ? 'main' : ''}"><span class="obj-dot"></span><div><b>${esc(o.quest === 'favor' ? 'Pedido' : o.quest === 'gathering' ? 'Hoje' : QUESTS[o.quest].title)}</b><p>${esc(o.text)}</p></div></li>`).join('')
     : '<li class="muted">Nenhum objetivo ativo. Converse com as pessoas.</li>';
   const stories = Object.entries(state.quests)
     .map(([id, q]) => {
